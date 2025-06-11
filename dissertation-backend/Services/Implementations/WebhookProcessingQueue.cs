@@ -1,5 +1,5 @@
 ﻿using dissertation_backend.Services.Interfaces;
-using Models.GithubModels;
+using Models.GithubModels.WebhookModels;
 using System.Collections.Concurrent;
 
 namespace dissertation_backend.Services.Implementations;

@@ -1,5 +1,5 @@
 ﻿using dissertation_backend.Services.Interfaces;
-using Models.GithubModels;
+using Models.GithubModels.WebhookModels;
 
 namespace dissertation_backend.Workers;
 
@@ -59,7 +59,9 @@ public class WebhookBackgroundService : BackgroundService
                 item.Payload.PullRequest?.Number,
                 item.Payload.Repository?.FullName);
 
-            await SimulateProcessingWork();
+            var gitHubRepositoryServicescope = scope.ServiceProvider.GetRequiredService<IGitHubRepositoryService>();
+
+            var context = await gitHubRepositoryServicescope.GetPullRequestContextAsync(item.Payload);
 
             _logger.LogInformation("Successfully processed webhook item");
         }
@@ -68,11 +70,5 @@ public class WebhookBackgroundService : BackgroundService
             _logger.LogError(ex, "Failed to process webhook item");
             // TODO: Consider implementing retry logic or dead letter queue
         }
-    }
-
-    private static async Task SimulateProcessingWork()
-    {
-        // Simulate some work being done
-        await Task.Delay(TimeSpan.FromSeconds(1));
     }
 }

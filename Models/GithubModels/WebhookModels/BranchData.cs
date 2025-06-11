@@ -1,6 +1,6 @@
 ﻿using System.Text.Json.Serialization;
 
-namespace Models.GithubModels;
+namespace Models.GithubModels.WebhookModels;
 
 public class BranchData
 {

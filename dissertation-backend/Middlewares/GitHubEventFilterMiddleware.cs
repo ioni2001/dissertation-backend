@@ -1,4 +1,4 @@
-﻿using Models.GithubModels;
+﻿using Models.GithubModels.WebhookModels;
 using System.Text.Json;
 
 namespace dissertation_backend.Middlewares;

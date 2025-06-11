@@ -1,6 +1,7 @@
 ﻿using dissertation_backend.Services.Interfaces;
 using Microsoft.AspNetCore.Mvc;
 using Models.GithubModels;
+using Models.GithubModels.WebhookModels;
 
 namespace dissertation_backend.Controllers;
 

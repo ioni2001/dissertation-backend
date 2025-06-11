@@ -9,10 +9,13 @@ var services = builder.Services;
 
 // Add services
 services.AddControllers();
+builder.Services.AddHttpClient();
 services.AddEndpointsApiExplorer();
 services.AddSwaggerGen();
 
 // Add webhook services
+builder.Services.AddScoped<IGitHubRepositoryService, GitHubRepositoryService>();
+builder.Services.AddScoped<ICodeAnalysisService, CodeAnalysisService>();
 services.AddSingleton<IWebhookProcessingQueue, WebhookProcessingQueue>();
 services.AddHostedService<WebhookBackgroundService>();
 

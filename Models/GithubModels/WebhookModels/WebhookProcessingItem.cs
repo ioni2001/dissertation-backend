@@ -1,4 +1,4 @@
-﻿namespace Models.GithubModels;
+﻿namespace Models.GithubModels.WebhookModels;
 
 public class WebhookProcessingItem
 {
