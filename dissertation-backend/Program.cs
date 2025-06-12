@@ -16,6 +16,7 @@ services.AddSwaggerGen();
 // Add webhook services
 builder.Services.AddScoped<IGitHubRepositoryService, GitHubRepositoryService>();
 builder.Services.AddScoped<ICodeAnalysisService, CodeAnalysisService>();
+builder.Services.AddScoped<IPatchMergerService, PatchMergerService>();
 services.AddSingleton<IWebhookProcessingQueue, WebhookProcessingQueue>();
 services.AddHostedService<WebhookBackgroundService>();
 

@@ -18,8 +18,6 @@ public class CodeAnalysisService : ICodeAnalysisService
 
     public AnalyzedCode AnalyzeAndTruncateCode(string content, string patch)
     {
-        _logger.LogInformation("Started to analyze and truncate code");
-
         var result = new AnalyzedCode();
 
         // Extract basic information
@@ -141,7 +139,7 @@ public class CodeAnalysisService : ICodeAnalysisService
 
     private string ApplyTruncationHeuristics(string content, HashSet<int> changedLines)
     {
-        var maxTokens = _configuration.GetValue<int>("OpenAI:MaxTokensPerFile", 400000);
+        var maxTokens = _configuration.GetValue<int>("OpenAI:MaxTokensPerFile", 2000);
         var currentTokens = EstimateTokenCount(content);
 
         if (currentTokens <= maxTokens)
@@ -264,6 +262,7 @@ public class CodeAnalysisService : ICodeAnalysisService
         if (string.IsNullOrEmpty(text)) return 0;
 
         // Rough estimation: 1 token ≈ 4 characters for code
+        // This is a simplification - actual tokenization depends on the model
         var characterCount = text.Length;
         var wordCount = text.Split(new char[] { ' ', '\n', '\t', '\r' }, StringSplitOptions.RemoveEmptyEntries).Length;
 

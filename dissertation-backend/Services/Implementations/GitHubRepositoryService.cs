@@ -14,12 +14,14 @@ public class GitHubRepositoryService : IGitHubRepositoryService
     private readonly IConfiguration _configuration;
     private readonly ILogger<GitHubRepositoryService> _logger;
     private readonly ICodeAnalysisService _codeAnalysisService;
+    private readonly IPatchMergerService _patchMergerService;
 
     public GitHubRepositoryService(
         HttpClient httpClient,
         IConfiguration configuration,
         ILogger<GitHubRepositoryService> logger,
-        ICodeAnalysisService codeAnalysisService)
+        ICodeAnalysisService codeAnalysisService,
+        IPatchMergerService patchMergerService)
     {
         _httpClient = httpClient;
         _configuration = configuration;
@@ -27,6 +29,7 @@ public class GitHubRepositoryService : IGitHubRepositoryService
         _codeAnalysisService = codeAnalysisService;
 
         ConfigureHttpClient();
+        _patchMergerService = patchMergerService;
     }
 
     private void ConfigureHttpClient()
@@ -115,66 +118,108 @@ public class GitHubRepositoryService : IGitHubRepositoryService
         {
             var priority = CalculateFilePriority(file);
             prioritizedFiles.Add((file, priority));
+
+            _logger.LogDebug("File {FileName} - Status: {Status}, Priority: {Priority}, Changes: {Changes}",
+                file.Filename, file.Status, priority, file.Changes);
         }
 
         // Sort by priority (higher is better) and take top files
-        var maxFiles = _configuration.GetValue<int>("GitHub:MaxFilesPerPR", 20);
-        return prioritizedFiles
+        var maxFiles = _configuration.GetValue<int>("GitHub:MaxFilesPerPR", 10);
+        var selectedFiles = prioritizedFiles
             .OrderByDescending(x => x.priority)
             .Take(maxFiles)
             .Select(x => x.file)
             .ToList();
+
+        _logger.LogInformation("Selected {SelectedCount} files out of {TotalCount} C# files for processing",
+            selectedFiles.Count, files.Count);
+
+        return selectedFiles;
     }
 
     private int CalculateFilePriority(GitHubFile file)
     {
         var priority = 0;
 
-        // Higher priority for files with more changes
-        priority += Math.Min(file.Changes, 50); // Cap at 50 to avoid skewing
+        // Base priority for changes (cap to prevent skewing)
+        priority += Math.Min(file.Changes, 100);
+
+        // HIGHEST priority for new files (we definitely want to test new code)
+        if (file.Status == "added")
+        {
+            priority += 200;
+            _logger.LogDebug("New file {FileName} gets +200 priority", file.Filename);
+        }
+
+        // HIGH priority for modified files
+        if (file.Status == "modified")
+        {
+            priority += 150;
+            _logger.LogDebug("Modified file {FileName} gets +150 priority", file.Filename);
+        }
+
+        // LOWER priority for deleted files (might still be useful for context)
+        if (file.Status == "removed")
+        {
+            priority += 10;
+            _logger.LogDebug("Deleted file {FileName} gets +10 priority", file.Filename);
+        }
 
         // Prioritize business logic files over test files
         if (file.Filename.Contains("Test", StringComparison.OrdinalIgnoreCase) ||
-            file.Filename.Contains("Spec", StringComparison.OrdinalIgnoreCase))
+            file.Filename.Contains("Spec", StringComparison.OrdinalIgnoreCase) ||
+            file.Filename.EndsWith("Tests.cs", StringComparison.OrdinalIgnoreCase))
         {
-            priority -= 20;
+            priority -= 50; // Reduced penalty since we might want to see existing tests
+            _logger.LogDebug("Test file {FileName} gets -50 priority", file.Filename);
         }
 
-        // Prioritize service/business logic files
-        if (file.Filename.Contains("Service", StringComparison.OrdinalIgnoreCase) ||
-            file.Filename.Contains("Controller", StringComparison.OrdinalIgnoreCase) ||
-            file.Filename.Contains("Repository", StringComparison.OrdinalIgnoreCase) ||
-            file.Filename.Contains("Manager", StringComparison.OrdinalIgnoreCase))
+        // HIGH priority for important business logic patterns
+        var fileName = file.Filename.ToLower();
+        if (fileName.Contains("service") || fileName.Contains("controller") ||
+            fileName.Contains("repository") || fileName.Contains("manager") ||
+            fileName.Contains("handler") || fileName.Contains("processor"))
         {
-            priority += 30;
+            priority += 80;
+            _logger.LogDebug("Business logic file {FileName} gets +80 priority", file.Filename);
         }
 
-        // Lower priority for configuration files
-        if (file.Filename.EndsWith(".json") || file.Filename.EndsWith(".xml") ||
-            file.Filename.EndsWith(".config"))
+        // MEDIUM priority for model/entity files
+        if (fileName.Contains("model") || fileName.Contains("entity") ||
+            fileName.Contains("dto") || fileName.Contains("request") ||
+            fileName.Contains("response"))
         {
-            priority -= 10;
+            priority += 60;
+            _logger.LogDebug("Model file {FileName} gets +60 priority", file.Filename);
         }
 
-        // Prioritize files in certain directories
+        // Prioritize files in important directories
         var path = file.Filename.ToLower();
         if (path.Contains("/services/") || path.Contains("/controllers/") ||
-            path.Contains("/business/") || path.Contains("/core/"))
+            path.Contains("/business/") || path.Contains("/core/") ||
+            path.Contains("/domain/") || path.Contains("/application/"))
         {
-            priority += 20;
+            priority += 50;
+            _logger.LogDebug("Important directory file {FileName} gets +50 priority", file.Filename);
         }
 
-        return priority;
+        // Lower priority for infrastructure/framework files
+        if (path.Contains("/infrastructure/") || path.Contains("/framework/") ||
+            path.Contains("/migrations/") || path.Contains("program.cs") ||
+            path.Contains("startup.cs"))
+        {
+            priority -= 20;
+            _logger.LogDebug("Infrastructure file {FileName} gets -20 priority", file.Filename);
+        }
+
+        _logger.LogDebug("Final priority for {FileName}: {Priority}", file.Filename, priority);
+        return Math.Max(priority, 0); // Ensure non-negative priority
     }
 
     private async Task<ModifiedFileContext?> GetFileContextAsync(GitHubFile file, string repository)
     {
         try
         {
-            // Get full file content
-            var fileContent = await GetFileContentAsync(repository, file.Filename);
-            if (fileContent == null) return null;
-
             var context = new ModifiedFileContext
             {
                 FileName = file.Filename,
@@ -183,9 +228,44 @@ public class GitHubRepositoryService : IGitHubRepositoryService
                 Patch = file.Patch
             };
 
-            // Decode and analyze the file content
-            var content = DecodeBase64Content(fileContent.Content);
-            var analyzedContent = _codeAnalysisService.AnalyzeAndTruncateCode(content, file.Patch);
+            string finalContent;
+
+            if (file.Status == "added")
+            {
+                // For new files, reconstruct content from patch
+                finalContent = ReconstructNewFileFromPatch(file.Patch);
+                _logger.LogInformation("Reconstructed new file {FileName} with {Lines} lines",
+                    file.Filename, finalContent.Split('\n').Length);
+            }
+            else if (file.Status == "removed")
+            {
+                // Deleted files are ignored
+                _logger.LogInformation("Skipping deleted file {FileName}", file.Filename);
+                return null;
+            }
+            else
+            {
+                // For modified files, get the current content (after changes)
+                var fileContent = await GetFileContentAsync(repository, file.Filename);
+                if (fileContent == null)
+                {
+                    _logger.LogWarning("Could not retrieve content for modified file {FileName}", file.Filename);
+                    return null;
+                }
+                var decodedContent = DecodeBase64Content(fileContent.Content);
+                if (decodedContent == null)
+                {
+                    _logger.LogWarning("Could not decode retrieved content for modified file {FileName}", file.Filename);
+                    return null;
+                }
+
+                finalContent = _patchMergerService.MergePatchWithContent(decodedContent, file.Patch);
+
+                _logger.LogInformation("Retrieved current content for modified file {FileName}", file.Filename);
+            }
+
+            // Analyze the final content (new shape of the file)
+            var analyzedContent = _codeAnalysisService.AnalyzeAndTruncateCode(finalContent, file.Patch);
 
             context.RelevantContent = analyzedContent.TruncatedContent;
             context.ExtractedClasses = analyzedContent.Classes;
@@ -196,9 +276,46 @@ public class GitHubRepositoryService : IGitHubRepositoryService
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to get context for file {FileName}", file.Filename);
+            _logger.LogWarning(ex, "Failed to get context for file {FileName}: {Error}", file.Filename, ex.Message);
             return null;
         }
+    }
+
+    private string ReconstructNewFileFromPatch(string patch)
+    {
+        if (string.IsNullOrEmpty(patch))
+        {
+            return string.Empty;
+        }
+
+        var lines = patch.Split('\n');
+        var fileContent = new List<string>();
+        var inFileContent = false;
+
+        foreach (var line in lines)
+        {
+            // Skip diff headers
+            if (line.StartsWith("@@"))
+            {
+                inFileContent = true;
+                continue;
+            }
+
+            if (!inFileContent) continue;
+
+            // For new files (added), we want lines that start with + (but not +++)
+            if (line.StartsWith("+") && !line.StartsWith("+++"))
+            {
+                fileContent.Add(line.Substring(1)); // Remove the + prefix
+            }
+            // For context lines (no prefix), include them as well
+            else if (!line.StartsWith("-") && !line.StartsWith("+++") && !line.StartsWith("---"))
+            {
+                fileContent.Add(line);
+            }
+        }
+
+        return string.Join('\n', fileContent);
     }
 
     private async Task<GitHubFileContent?> GetFileContentAsync(string repository, string filePath)
@@ -246,7 +363,7 @@ public class GitHubRepositoryService : IGitHubRepositoryService
         // Get related files based on dependencies
         var relatedFiles = await GetRelatedFilesAsync(repository, dependencies.ToList());
 
-        var maxRelatedFiles = _configuration.GetValue<int>("GitHub:MaxRelatedFiles", 7);
+        var maxRelatedFiles = _configuration.GetValue<int>("GitHub:MaxRelatedFiles", 5);
         foreach (var relatedFile in relatedFiles.Take(maxRelatedFiles))
         {
             if (!context.ModifiedFiles.Any(f => f.FileName == relatedFile.FileName))
@@ -262,7 +379,7 @@ public class GitHubRepositoryService : IGitHubRepositoryService
         context.EstimatedTokenCount = totalTokens;
 
         // If we're over the limit, apply additional truncation
-        var maxTotalTokens = _configuration.GetValue<int>("OpenAI:MaxTotalTokens", 2000000);
+        var maxTotalTokens = _configuration.GetValue<int>("OpenAI:MaxTotalTokens", 8000);
         if (totalTokens > maxTotalTokens)
         {
             await ApplyGlobalTruncation(context, maxTotalTokens);
