@@ -19,14 +19,12 @@ public class GitHubEventFilterMiddleware
 
     public async Task InvokeAsync(HttpContext context)
     {
-        // Only filter GitHub webhook endpoints
         if (!context.Request.Path.StartsWithSegments("/api/webhooks/github"))
         {
             await _next(context);
             return;
         }
 
-        // Check if it's a pull_request event
         if (!context.Request.Headers.TryGetValue("X-GitHub-Event", out var eventHeader))
         {
             _logger.LogWarning("Missing X-GitHub-Event header");
@@ -46,7 +44,6 @@ public class GitHubEventFilterMiddleware
             return;
         }
 
-        // Read and parse the payload to check the action
         context.Request.EnableBuffering();
         var body = await new StreamReader(context.Request.Body).ReadToEndAsync();
         context.Request.Body.Position = 0;
@@ -67,7 +64,6 @@ public class GitHubEventFilterMiddleware
                 return;
             }
 
-            // Store the parsed payload in HttpContext for the controller
             context.Items["GitHubPayload"] = payload;
             context.Items["GitHubEventType"] = eventType;
         }

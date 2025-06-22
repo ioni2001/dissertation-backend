@@ -1,4 +1,8 @@
 ﻿using dissertation_backend.Services.Interfaces;
+using GeminiIntegration;
+using GeneratedUnitTestsCompiler;
+using Microsoft.Build.Locator;
+using Microsoft.CodeAnalysis.MSBuild;
 using Models.GithubModels.WebhookModels;
 
 namespace dissertation_backend.Workers;
@@ -8,6 +12,7 @@ public class WebhookBackgroundService : BackgroundService
     private readonly IWebhookProcessingQueue _queue;
     private readonly ILogger<WebhookBackgroundService> _logger;
     private readonly IServiceScopeFactory _scopeFactory;
+    private readonly MSBuildWorkspace _workspace;
 
     public WebhookBackgroundService(
         IWebhookProcessingQueue queue,
@@ -17,6 +22,7 @@ public class WebhookBackgroundService : BackgroundService
         _queue = queue;
         _logger = logger;
         _scopeFactory = scopeFactory;
+        _workspace = CreateWorkspace();
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -49,7 +55,6 @@ public class WebhookBackgroundService : BackgroundService
     private async Task ProcessWebhookAsync(WebhookProcessingItem item)
     {
         using var scope = _scopeFactory.CreateScope();
-
         try
         {
             _logger.LogInformation(
@@ -59,16 +64,63 @@ public class WebhookBackgroundService : BackgroundService
                 item.Payload.PullRequest?.Number,
                 item.Payload.Repository?.FullName);
 
-            var gitHubRepositoryServicescope = scope.ServiceProvider.GetRequiredService<IGitHubRepositoryService>();
+            // Git data
+            var gitUser = item.Payload.Repository.FullName.Split('/').First();
+            var gitUrl = $"https://github.com/{item.Payload.Repository.FullName}.git";
+            var sourceBranch = item.Payload.PullRequest.Head.Ref;
 
-            var context = await gitHubRepositoryServicescope.GetPullRequestContextAsync(item.Payload);
+            // Services injection
+            var gitHubRepositoryService = scope.ServiceProvider.GetRequiredService<IGitHubRepositoryService>();
+            var geminiUnitTestGenerator = scope.ServiceProvider.GetRequiredService<IGeminiUnitTestGenerator>();
+            var testCodeCompiler = scope.ServiceProvider.GetRequiredService<ITestCodeCompiler>();
+
+            var context = await gitHubRepositoryService.GetPullRequestContextAsync(item.Payload);
+
+            var response = await geminiUnitTestGenerator.GenerateUnitTestsAsync(context);
+
+            var repoPath = testCodeCompiler.CloneRepository(gitUrl, sourceBranch, gitUser);
+
+            await testCodeCompiler.CompileAllTestsAsync(response.GeneratedTests, repoPath, _workspace);
+
+            for (int i = 0; i < response.GeneratedTests.Count; i++)
+            {
+                var test = response.GeneratedTests[i];
+
+                while (!test.CompilationResult?.IsSuccessful ?? true)
+                {
+                    var regenerationResponse = await geminiUnitTestGenerator.RegenerateFailingUnitTestsAsync(context, test);
+                    if (!regenerationResponse.Success)
+                    {
+                        continue;
+                    }
+
+                    test = regenerationResponse.GeneratedTests[0];
+
+                    await testCodeCompiler.CompileTestCodeAsync(test, repoPath, _workspace);
+                }
+
+                response.GeneratedTests[i] = test;
+            }
+
+            testCodeCompiler.CleanupRepository(repoPath);
 
             _logger.LogInformation("Successfully processed webhook item");
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to process webhook item");
-            // TODO: Consider implementing retry logic or dead letter queue
         }
+    }
+
+    private static MSBuildWorkspace CreateWorkspace()
+    {
+        MSBuildLocator.RegisterDefaults();
+
+        var props = new Dictionary<string, string>{
+              {"DisableBuild", "true"},
+              {"SkipUnchangedProjectCheck", "true"}
+            };
+
+        return MSBuildWorkspace.Create(props);
     }
 }

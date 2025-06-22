@@ -139,7 +139,7 @@ public class CodeAnalysisService : ICodeAnalysisService
 
     private string ApplyTruncationHeuristics(string content, HashSet<int> changedLines)
     {
-        var maxTokens = _configuration.GetValue<int>("OpenAI:MaxTokensPerFile", 2000);
+        var maxTokens = _configuration.GetValue<int>("GeminiAI:MaxTokensPerFile", 2000);
         var currentTokens = EstimateTokenCount(content);
 
         if (currentTokens <= maxTokens)

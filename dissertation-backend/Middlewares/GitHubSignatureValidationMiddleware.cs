@@ -21,7 +21,6 @@ public class GitHubSignatureValidationMiddleware
 
     public async Task InvokeAsync(HttpContext context)
     {
-        // Only validate GitHub webhook endpoints
         if (!context.Request.Path.StartsWithSegments("/api/webhooks/github"))
         {
             await _next(context);
@@ -38,7 +37,6 @@ public class GitHubSignatureValidationMiddleware
             return;
         }
 
-        // Get the signature from headers
         if (!context.Request.Headers.TryGetValue("X-Hub-Signature-256", out var signatureHeader))
         {
             _logger.LogWarning("Missing X-Hub-Signature-256 header");
@@ -58,12 +56,10 @@ public class GitHubSignatureValidationMiddleware
             return;
         }
 
-        // Read the request body
         context.Request.EnableBuffering();
         var body = await new StreamReader(context.Request.Body).ReadToEndAsync();
         context.Request.Body.Position = 0;
 
-        // Validate the signature
         if (!ValidateSignature(body, signature, secret))
         {
             _logger.LogWarning("Invalid signature for webhook request");

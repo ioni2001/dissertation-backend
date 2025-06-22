@@ -379,7 +379,7 @@ public class GitHubRepositoryService : IGitHubRepositoryService
         context.EstimatedTokenCount = totalTokens;
 
         // If we're over the limit, apply additional truncation
-        var maxTotalTokens = _configuration.GetValue<int>("OpenAI:MaxTotalTokens", 8000);
+        var maxTotalTokens = _configuration.GetValue<int>("GeminiAI:MaxTotalTokens", 8000);
         if (totalTokens > maxTotalTokens)
         {
             await ApplyGlobalTruncation(context, maxTotalTokens);
