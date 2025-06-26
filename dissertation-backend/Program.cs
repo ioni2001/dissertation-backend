@@ -4,9 +4,9 @@ using dissertation_backend.Services.Interfaces;
 using dissertation_backend.Workers;
 using GeminiIntegration;
 using GeneratedUnitTestsCompiler;
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Options;
 using Models.GithubModels.Configuration;
+using Octokit;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -27,6 +27,18 @@ services.AddScoped<ITestCodeCompiler, TestCodeCompiler>();
 services.AddSingleton<IWebhookProcessingQueue, WebhookProcessingQueue>();
 services.AddHostedService<WebhookBackgroundService>();
 services.AddHttpClient<GeminiUnitTestGenerator>();
+
+var gitHubToken = builder.Configuration["GitHub:Token"];
+
+services.AddSingleton(provider =>
+{
+    var client = new GitHubClient(new ProductHeaderValue("DissertationBackend"))
+    {
+        Credentials = new Credentials(gitHubToken)
+    };
+
+    return client;
+});
 
 services.Configure<GitHub>(builder.Configuration.GetRequiredSection("GitHub"));
 services.AddScoped(cfg => cfg.GetService<IOptions<GitHub>>().Value);

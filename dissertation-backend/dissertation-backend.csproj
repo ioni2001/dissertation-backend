@@ -21,6 +21,7 @@
     <PackageReference Include="Microsoft.Extensions.Logging" Version="9.0.5" />
     <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="9.0.5" />
     <PackageReference Include="Microsoft.Extensions.Logging.Debug" Version="9.0.5" />
+    <PackageReference Include="Octokit" Version="14.0.0" />
     <PackageReference Include="Swashbuckle.AspNetCore.Swagger" Version="8.1.4" />
     <PackageReference Include="Swashbuckle.AspNetCore.SwaggerGen" Version="8.1.4" />
     <PackageReference Include="Swashbuckle.AspNetCore.SwaggerUI" Version="8.1.4" />

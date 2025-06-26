@@ -41,6 +41,20 @@ public class TestCodeCompiler : ITestCodeCompiler
 
         var testTree = CSharpSyntaxTree.ParseText(unitTest.TestCode, projectParseOptions);
         var compilation = await project!.GetCompilationAsync();
+
+        var existingTestFile = project.Documents.FirstOrDefault(d =>
+        Path.GetFileName(d.FilePath ?? "") == unitTest.FileName);
+
+        if (existingTestFile != null)
+        {
+            var existingTree = await existingTestFile.GetSyntaxTreeAsync();
+            if (existingTree != null)
+            {
+                compilation = compilation?.RemoveSyntaxTrees(existingTree);
+                _logger.LogInformation($"Removed existing syntax tree for file: {unitTest.FileName}");
+            }
+        }
+
         compilation = compilation?.AddSyntaxTrees(testTree);
 
         using var ms = new MemoryStream();
@@ -93,6 +107,20 @@ public class TestCodeCompiler : ITestCodeCompiler
         {
             var testTree = CSharpSyntaxTree.ParseText(test.TestCode, projectParseOptions);
             var compilation = await project!.GetCompilationAsync();
+
+            var existingTestFile = project.Documents.FirstOrDefault(d =>
+                Path.GetFileName(d.FilePath ?? "") == test.FileName);
+
+            if (existingTestFile != null)
+            {
+                var existingTree = await existingTestFile.GetSyntaxTreeAsync();
+                if (existingTree != null)
+                {
+                    compilation = compilation?.RemoveSyntaxTrees(existingTree);
+                    _logger.LogInformation($"Removed existing syntax tree for file: {test.FileName}");
+                }
+            }
+
             compilation = compilation?.AddSyntaxTrees(testTree);
 
             using var ms = new MemoryStream();

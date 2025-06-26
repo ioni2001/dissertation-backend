@@ -74,6 +74,14 @@ public class WebhookBackgroundService : BackgroundService
             var geminiUnitTestGenerator = scope.ServiceProvider.GetRequiredService<IGeminiUnitTestGenerator>();
             var testCodeCompiler = scope.ServiceProvider.GetRequiredService<ITestCodeCompiler>();
 
+            // Check whether PR commit should be processed or not
+            if (!await gitHubRepositoryService.CheckPullRequestCommitValidityAsync(gitUser, item.Payload.Repository.Name, item.Payload.PullRequest.Number))
+            {
+                _logger.LogInformation("Last commit was automatically created with generated unit tests. Skipping...");
+
+                return;
+            }
+
             var context = await gitHubRepositoryService.GetPullRequestContextAsync(item.Payload);
 
             var response = await geminiUnitTestGenerator.GenerateUnitTestsAsync(context);
@@ -82,12 +90,16 @@ public class WebhookBackgroundService : BackgroundService
 
             await testCodeCompiler.CompileAllTestsAsync(response.GeneratedTests, repoPath, _workspace);
 
+            // Retry for unit tests compilation
             for (int i = 0; i < response.GeneratedTests.Count; i++)
             {
                 var test = response.GeneratedTests[i];
+                var maxAttempts = 5;
 
-                while (!test.CompilationResult?.IsSuccessful ?? true)
+                while (!test.CompilationResult?.IsSuccessful ?? true && (maxAttempts > 0))
                 {
+                    maxAttempts--;
+
                     var regenerationResponse = await geminiUnitTestGenerator.RegenerateFailingUnitTestsAsync(context, test);
                     if (!regenerationResponse.Success)
                     {
@@ -99,10 +111,20 @@ public class WebhookBackgroundService : BackgroundService
                     await testCodeCompiler.CompileTestCodeAsync(test, repoPath, _workspace);
                 }
 
-                response.GeneratedTests[i] = test;
+                if (maxAttempts == 0)
+                {
+                    response.GeneratedTests.RemoveAt(i);
+                    i--;
+                }
+                else
+                {
+                    response.GeneratedTests[i] = test;
+                }
             }
 
             testCodeCompiler.CleanupRepository(repoPath);
+
+            await gitHubRepositoryService.PushUnitTestsToPullRequestAsync(item, response, gitUser);
 
             _logger.LogInformation("Successfully processed webhook item");
         }

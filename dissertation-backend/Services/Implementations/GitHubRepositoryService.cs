@@ -5,12 +5,15 @@ using System.Text;
 using Models.GithubModels.WebhookModels;
 using Models.GithubModels.ContextModels;
 using Models.GithubModels.GithubApiModels;
+using Models.GeminiModels;
+using Octokit;
 
 namespace dissertation_backend.Services.Implementations;
 
 public class GitHubRepositoryService : IGitHubRepositoryService
 {
     private readonly HttpClient _httpClient;
+    private readonly GitHubClient _gitHubClient;
     private readonly IConfiguration _configuration;
     private readonly ILogger<GitHubRepositoryService> _logger;
     private readonly ICodeAnalysisService _codeAnalysisService;
@@ -18,12 +21,14 @@ public class GitHubRepositoryService : IGitHubRepositoryService
 
     public GitHubRepositoryService(
         HttpClient httpClient,
+        GitHubClient gitHubClient,
         IConfiguration configuration,
         ILogger<GitHubRepositoryService> logger,
         ICodeAnalysisService codeAnalysisService,
         IPatchMergerService patchMergerService)
     {
         _httpClient = httpClient;
+        _gitHubClient = gitHubClient;
         _configuration = configuration;
         _logger = logger;
         _codeAnalysisService = codeAnalysisService;
@@ -88,6 +93,60 @@ public class GitHubRepositoryService : IGitHubRepositoryService
             _logger.LogError(ex, "Error retrieving PR context for PR #{PrNumber}", payload.PullRequest.Number);
             throw;
         }
+    }
+
+    public async Task PushUnitTestsToPullRequestAsync(WebhookProcessingItem webhook, UnitTestGenerationResult unitTestsResult, string owner)
+    {
+        var headSha = webhook.Payload.PullRequest?.Head?.Sha;
+
+        var baseTree = await _gitHubClient.Git.Tree.Get(owner, webhook.Payload?.Repository?.Name, headSha);
+        var treeItems = new List<NewTreeItem>();
+
+        foreach (var unitTest in unitTestsResult.GeneratedTests)
+        {
+            var filePath = $"UnitTests/{unitTest.FileName}";
+         
+            var newTreeItem = new NewTreeItem
+            {
+                Path = filePath,
+                Mode = "100644",
+                Type = TreeType.Blob,
+                Content = unitTest.TestCode
+            };
+
+            treeItems.Add(newTreeItem);
+        }
+
+        if (treeItems.Count == 0)
+        {
+            _logger.LogInformation("No unit tests to push");
+            return;
+        }
+
+        var newTree = new NewTree() { BaseTree = baseTree.Sha };
+        foreach (var treeItem in treeItems)
+        {
+            newTree.Tree.Add(treeItem);
+        }
+
+        var newTreeResponse = await _gitHubClient.Git.Tree.Create(owner, webhook.Payload?.Repository?.Name, newTree);
+
+        var commit = await _gitHubClient.Git.Commit.Create(owner, webhook.Payload?.Repository?.Name, new NewCommit(
+            "Add/Update generated unit tests",
+            newTreeResponse.Sha,
+            headSha));
+
+        await _gitHubClient.Git.Reference.Update(owner, webhook.Payload?.Repository?.Name, $"heads/{webhook.Payload?.PullRequest?.Head?.Ref}",
+            new ReferenceUpdate(commit.Sha));
+
+        _logger.LogInformation($"Successfully pushed {treeItems.Count} unit test files to PR #{webhook.Payload?.PullRequest?.Number}");
+    }
+
+    public async Task<bool> CheckPullRequestCommitValidityAsync(string owner, string repo, int pullRequestNumber)
+    {
+        var lastCommitName = await GetLastCommitMessageFromPullRequestAsync(owner, repo, pullRequestNumber);
+
+        return !lastCommitName.Equals("Add/Update generated unit tests");
     }
 
     private async Task<List<GitHubFile>> GetPullRequestFilesAsync(string repository, int prNumber)
@@ -525,5 +584,13 @@ public class GitHubRepositoryService : IGitHubRepositoryService
         }
 
         return relatedFiles;
+    }
+
+    private async Task<string> GetLastCommitMessageFromPullRequestAsync(string owner, string repo, int pullRequestNumber)
+    {
+        var pullRequest = await _gitHubClient.PullRequest.Get(owner, repo, pullRequestNumber);
+        var commit = await _gitHubClient.Repository.Commit.Get(owner, repo, pullRequest.Head.Sha);
+
+        return commit.Commit.Message;
     }
 }
