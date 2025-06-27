@@ -7,6 +7,8 @@ using Models.GithubModels.ContextModels;
 using Models.GithubModels.GithubApiModels;
 using Models.GeminiModels;
 using Octokit;
+using Models.LoggingModels;
+using SignalRLogger;
 
 namespace dissertation_backend.Services.Implementations;
 
@@ -18,6 +20,7 @@ public class GitHubRepositoryService : IGitHubRepositoryService
     private readonly ILogger<GitHubRepositoryService> _logger;
     private readonly ICodeAnalysisService _codeAnalysisService;
     private readonly IPatchMergerService _patchMergerService;
+    private readonly ISignalRLoggerService _signalRLoggerService;
 
     public GitHubRepositoryService(
         HttpClient httpClient,
@@ -25,7 +28,8 @@ public class GitHubRepositoryService : IGitHubRepositoryService
         IConfiguration configuration,
         ILogger<GitHubRepositoryService> logger,
         ICodeAnalysisService codeAnalysisService,
-        IPatchMergerService patchMergerService)
+        IPatchMergerService patchMergerService,
+        ISignalRLoggerService signalRLoggerService)
     {
         _httpClient = httpClient;
         _gitHubClient = gitHubClient;
@@ -35,6 +39,7 @@ public class GitHubRepositoryService : IGitHubRepositoryService
 
         ConfigureHttpClient();
         _patchMergerService = patchMergerService;
+        _signalRLoggerService = signalRLoggerService;
     }
 
     private void ConfigureHttpClient()
@@ -55,6 +60,8 @@ public class GitHubRepositoryService : IGitHubRepositoryService
     {
         try
         {
+            await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Information,
+                 $"Started getting Pull Request Context: PR={payload.PullRequest.Number}, Title={payload.PullRequest.Title}, Description={payload.PullRequest.Body}, Repository={payload.Repository.FullName}"));
             var context = new PullRequestContext
             {
                 PullRequestNumber = payload.PullRequest.Number,
@@ -71,7 +78,7 @@ public class GitHubRepositoryService : IGitHubRepositoryService
                                   .ToList();
 
             // Apply heuristics to get the most relevant context
-            var prioritizedFiles = await ApplyFileSelectionHeuristics(csharpFiles, payload.Repository.FullName);
+            var prioritizedFiles = await ApplyFileSelectionHeuristics(csharpFiles);
 
             // Get detailed context for prioritized files
             foreach (var file in prioritizedFiles)
@@ -97,6 +104,9 @@ public class GitHubRepositoryService : IGitHubRepositoryService
 
     public async Task PushUnitTestsToPullRequestAsync(WebhookProcessingItem webhook, UnitTestGenerationResult unitTestsResult, string owner)
     {
+        await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Information,
+            $"Trying to push generated unit tests to the PR {webhook.Payload.PullRequest.Title}"));
+
         var headSha = webhook.Payload.PullRequest?.Head?.Sha;
 
         var baseTree = await _gitHubClient.Git.Tree.Get(owner, webhook.Payload?.Repository?.Name, headSha);
@@ -120,6 +130,9 @@ public class GitHubRepositoryService : IGitHubRepositoryService
         if (treeItems.Count == 0)
         {
             _logger.LogInformation("No unit tests to push");
+            await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Warning,
+                "No unit tests to push"));
+
             return;
         }
 
@@ -140,6 +153,8 @@ public class GitHubRepositoryService : IGitHubRepositoryService
             new ReferenceUpdate(commit.Sha));
 
         _logger.LogInformation($"Successfully pushed {treeItems.Count} unit test files to PR #{webhook.Payload?.PullRequest?.Number}");
+        await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Information,
+                $"Successfully pushed {treeItems.Count} unit test files to PR {webhook.Payload?.PullRequest?.Title}"));
     }
 
     public async Task<bool> CheckPullRequestCommitValidityAsync(string owner, string repo, int pullRequestNumber)
@@ -152,11 +167,16 @@ public class GitHubRepositoryService : IGitHubRepositoryService
     private async Task<List<GitHubFile>> GetPullRequestFilesAsync(string repository, int prNumber)
     {
         var url = $"https://api.github.com/repos/{repository}/pulls/{prNumber}/files";
+
+        await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Information,
+            $"Sending GET HTTP call to GitHub to receive PR context. Url {url}"));
         var response = await _httpClient.GetAsync(url);
 
         if (!response.IsSuccessStatusCode)
         {
             _logger.LogError("Failed to get PR files. Status: {StatusCode}", response.StatusCode);
+            await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Error, $"Failed to get PR files. Status: {response.StatusCode}"));
+
             return new List<GitHubFile>();
         }
 
@@ -169,17 +189,22 @@ public class GitHubRepositoryService : IGitHubRepositoryService
         return files ?? new List<GitHubFile>();
     }
 
-    private async Task<List<GitHubFile>> ApplyFileSelectionHeuristics(List<GitHubFile> files, string repository)
+    private async Task<List<GitHubFile>> ApplyFileSelectionHeuristics(List<GitHubFile> files)
     {
+        await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Information,
+            "Started applying file selection heuristics"));
         var prioritizedFiles = new List<(GitHubFile file, int priority)>();
 
         foreach (var file in files)
         {
-            var priority = CalculateFilePriority(file);
+            var priority = await CalculateFilePriority(file);
             prioritizedFiles.Add((file, priority));
 
             _logger.LogDebug("File {FileName} - Status: {Status}, Priority: {Priority}, Changes: {Changes}",
                 file.Filename, file.Status, priority, file.Changes);
+
+            await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Debug,
+            $"File {file.Filename} - Status: {file.Status}, Priority: {priority}, Changes: {file.Changes}"));
         }
 
         // Sort by priority (higher is better) and take top files
@@ -192,11 +217,13 @@ public class GitHubRepositoryService : IGitHubRepositoryService
 
         _logger.LogInformation("Selected {SelectedCount} files out of {TotalCount} C# files for processing",
             selectedFiles.Count, files.Count);
+        await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Information,
+            $"Selected {selectedFiles.Count} files out of {files.Count} C# files for processing"));
 
         return selectedFiles;
     }
 
-    private int CalculateFilePriority(GitHubFile file)
+    private async Task<int> CalculateFilePriority(GitHubFile file)
     {
         var priority = 0;
 
@@ -208,6 +235,8 @@ public class GitHubRepositoryService : IGitHubRepositoryService
         {
             priority += 200;
             _logger.LogDebug("New file {FileName} gets +200 priority", file.Filename);
+            await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Debug,
+            $"New file {file.Filename} gets +200 priority"));
         }
 
         // HIGH priority for modified files
@@ -215,6 +244,8 @@ public class GitHubRepositoryService : IGitHubRepositoryService
         {
             priority += 150;
             _logger.LogDebug("Modified file {FileName} gets +150 priority", file.Filename);
+            await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Debug,
+            $"Modified file {file.Filename} gets +150 priority"));
         }
 
         // LOWER priority for deleted files (might still be useful for context)
@@ -222,6 +253,8 @@ public class GitHubRepositoryService : IGitHubRepositoryService
         {
             priority += 10;
             _logger.LogDebug("Deleted file {FileName} gets +10 priority", file.Filename);
+            await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Debug,
+            $"Deleted file {file.Filename} gets +10 priority"));
         }
 
         // Prioritize business logic files over test files
@@ -231,6 +264,8 @@ public class GitHubRepositoryService : IGitHubRepositoryService
         {
             priority -= 50; // Reduced penalty since we might want to see existing tests
             _logger.LogDebug("Test file {FileName} gets -50 priority", file.Filename);
+            await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Debug,
+            $"Test file {file.Filename} gets -50 priority"));
         }
 
         // HIGH priority for important business logic patterns
@@ -241,6 +276,8 @@ public class GitHubRepositoryService : IGitHubRepositoryService
         {
             priority += 80;
             _logger.LogDebug("Business logic file {FileName} gets +80 priority", file.Filename);
+            await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Debug,
+            $"Business logic file {file.Filename} gets +80 priority"));
         }
 
         // MEDIUM priority for model/entity files
@@ -250,6 +287,8 @@ public class GitHubRepositoryService : IGitHubRepositoryService
         {
             priority += 60;
             _logger.LogDebug("Model file {FileName} gets +60 priority", file.Filename);
+            await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Debug,
+            $"Model file {file.Filename} gets +60 priority"));
         }
 
         // Prioritize files in important directories
@@ -260,6 +299,8 @@ public class GitHubRepositoryService : IGitHubRepositoryService
         {
             priority += 50;
             _logger.LogDebug("Important directory file {FileName} gets +50 priority", file.Filename);
+            await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Debug,
+            $"Important directory file {file.Filename} gets +50 priority"));
         }
 
         // Lower priority for infrastructure/framework files
@@ -269,9 +310,13 @@ public class GitHubRepositoryService : IGitHubRepositoryService
         {
             priority -= 20;
             _logger.LogDebug("Infrastructure file {FileName} gets -20 priority", file.Filename);
+            await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Debug,
+            $"Infrastructure file {file.Filename} gets -20 priority"));
         }
 
         _logger.LogDebug("Final priority for {FileName}: {Priority}", file.Filename, priority);
+        await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Debug,
+            $"Final priority for {file.Filename}: {priority}"));
         return Math.Max(priority, 0); // Ensure non-negative priority
     }
 
@@ -295,11 +340,16 @@ public class GitHubRepositoryService : IGitHubRepositoryService
                 finalContent = ReconstructNewFileFromPatch(file.Patch);
                 _logger.LogInformation("Reconstructed new file {FileName} with {Lines} lines",
                     file.Filename, finalContent.Split('\n').Length);
+                await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Information,
+                    $"Reconstructed new file {file.Filename} with {finalContent.Split('\n').Length} lines"));
             }
             else if (file.Status == "removed")
             {
                 // Deleted files are ignored
                 _logger.LogInformation("Skipping deleted file {FileName}", file.Filename);
+                await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Information,
+                    $"Skipping deleted file {file.Filename}"));
+
                 return null;
             }
             else
@@ -309,18 +359,26 @@ public class GitHubRepositoryService : IGitHubRepositoryService
                 if (fileContent == null)
                 {
                     _logger.LogWarning("Could not retrieve content for modified file {FileName}", file.Filename);
+                    await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Warning,
+                    $"Could not retrieve content for modified file {file.Filename}"));
+
                     return null;
                 }
                 var decodedContent = DecodeBase64Content(fileContent.Content);
                 if (decodedContent == null)
                 {
                     _logger.LogWarning("Could not decode retrieved content for modified file {FileName}", file.Filename);
+                    await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Warning,
+                    $"Could not decode retrieved content for modified file {file.Filename}"));
+
                     return null;
                 }
 
                 finalContent = _patchMergerService.MergePatchWithContent(decodedContent, file.Patch);
 
                 _logger.LogInformation("Retrieved current content for modified file {FileName}", file.Filename);
+                await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Information,
+                    $"Retrieved current content for modified file {file.Filename}"));
             }
 
             // Analyze the final content (new shape of the file)
@@ -336,6 +394,9 @@ public class GitHubRepositoryService : IGitHubRepositoryService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to get context for file {FileName}: {Error}", file.Filename, ex.Message);
+            await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Error,
+                    $"Failed to get context for file {file.Filename}", ex.Message));
+
             return null;
         }
     }
@@ -380,12 +441,19 @@ public class GitHubRepositoryService : IGitHubRepositoryService
     private async Task<GitHubFileContent?> GetFileContentAsync(string repository, string filePath)
     {
         var url = $"https://api.github.com/repos/{repository}/contents/{filePath}";
+
+        await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Information,
+            $"Sending GET HTTP call to GitHub to receive file content. Url {url}"));
+
         var response = await _httpClient.GetAsync(url);
 
         if (!response.IsSuccessStatusCode)
         {
             _logger.LogWarning("Failed to get file content for {FilePath}. Status: {StatusCode}",
                 filePath, response.StatusCode);
+            await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Warning,
+            $"Failed to get file content for {filePath}. Status: {response.StatusCode}"));
+
             return null;
         }
 
@@ -592,5 +660,10 @@ public class GitHubRepositoryService : IGitHubRepositoryService
         var commit = await _gitHubClient.Repository.Commit.Get(owner, repo, pullRequest.Head.Sha);
 
         return commit.Commit.Message;
+    }
+
+    private static LogEntry BuildLog(Models.LoggingModels.LogLevel logLevel, string message, string? exception = "")
+    {
+        return new LogEntry() { Level = logLevel, Message = message, Exception = exception, Component = "GitHubRepositoryService" };
     }
 }

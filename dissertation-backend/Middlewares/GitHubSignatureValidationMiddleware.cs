@@ -1,4 +1,6 @@
-﻿using System.Security.Cryptography;
+﻿using Models.LoggingModels;
+using SignalRLogger;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace dissertation_backend.Middlewares;
@@ -19,8 +21,11 @@ public class GitHubSignatureValidationMiddleware
         _logger = logger;
     }
 
-    public async Task InvokeAsync(HttpContext context)
+    public async Task InvokeAsync(HttpContext context, ISignalRLoggerService signalRLoggerService)
     {
+
+        await signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Information, "Started validation of GitHub Signature for received PullRequest event"));
+
         if (!context.Request.Path.StartsWithSegments("/api/webhooks/github"))
         {
             await _next(context);
@@ -31,6 +36,8 @@ public class GitHubSignatureValidationMiddleware
         if (string.IsNullOrEmpty(secret))
         {
             _logger.LogError("GitHub webhook secret not configured");
+            await signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Error, "GitHub webhook secret not configured"));
+
 
             context.Response.StatusCode = 500;
             await context.Response.WriteAsync("Server configuration error");
@@ -40,6 +47,7 @@ public class GitHubSignatureValidationMiddleware
         if (!context.Request.Headers.TryGetValue("X-Hub-Signature-256", out var signatureHeader))
         {
             _logger.LogWarning("Missing X-Hub-Signature-256 header");
+            await signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Error, "Missing X-Hub-Signature-256 header"));
 
             context.Response.StatusCode = 401;
             await context.Response.WriteAsync("Missing signature");
@@ -49,8 +57,9 @@ public class GitHubSignatureValidationMiddleware
         var signature = signatureHeader.FirstOrDefault();
         if (string.IsNullOrEmpty(signature) || !signature.StartsWith("sha256="))
         {
-
             _logger.LogWarning("Invalid signature format");
+            await signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Error, "Invalid signature format"));
+
             context.Response.StatusCode = 401;
             await context.Response.WriteAsync("Invalid signature format");
             return;
@@ -63,11 +72,14 @@ public class GitHubSignatureValidationMiddleware
         if (!ValidateSignature(body, signature, secret))
         {
             _logger.LogWarning("Invalid signature for webhook request");
+            await signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Error, "Invalid signature for webhook request"));
 
             context.Response.StatusCode = 401;
             await context.Response.WriteAsync("Invalid signature");
             return;
         }
+
+        await signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Information, "Validation of GitHub Signature for received PullRequest event completed successfully"));
 
         await _next(context);
     }
@@ -84,5 +96,10 @@ public class GitHubSignatureValidationMiddleware
         using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(secret));
         var hash = hmac.ComputeHash(Encoding.UTF8.GetBytes(data));
         return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    private static LogEntry BuildLog(Models.LoggingModels.LogLevel logLevel, string message, string? exception = "") 
+    {
+        return new LogEntry() { Level = logLevel, Message = message, Exception = exception, Component = "GitHubSignatureValidationMiddleware" };
     }
 }

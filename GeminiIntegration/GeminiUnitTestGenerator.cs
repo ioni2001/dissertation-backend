@@ -5,6 +5,8 @@ using System.Text;
 using Models.GeminiModels;
 using Models.GithubModels.ContextModels;
 using Microsoft.Extensions.Configuration;
+using SignalRLogger;
+using Models.LoggingModels;
 
 namespace GeminiIntegration;
 
@@ -15,10 +17,16 @@ public class GeminiUnitTestGenerator : IGeminiUnitTestGenerator
     private readonly string _apiKey;
     private readonly string _model;
     private readonly string _baseUrl;
+    private readonly ISignalRLoggerService _signalRLoggerService;
 
-    public GeminiUnitTestGenerator(HttpClient httpClient, IConfiguration configuration, ILogger<GeminiUnitTestGenerator> logger)
+    public GeminiUnitTestGenerator(
+        HttpClient httpClient,
+        IConfiguration configuration,
+        ILogger<GeminiUnitTestGenerator> logger,
+        ISignalRLoggerService signalRLoggerService)
     {
         _httpClient = httpClient;
+        _signalRLoggerService = signalRLoggerService;
         _logger = logger;
         _apiKey = configuration["GeminiAI:ApiKey"] ?? throw new InvalidOperationException("Gemini API key not configured");
         _model = configuration["GeminiAI:Model"] ?? "gemini-1.5-pro";
@@ -29,10 +37,12 @@ public class GeminiUnitTestGenerator : IGeminiUnitTestGenerator
     {
         try
         {
-            var prompt = BuildUnitTestPrompt(prContext);
+            var prompt = await BuildUnitTestPromptAsync(prContext);
 
             _logger.LogInformation("Generating unit tests for PR #{PrNumber} with {FileCount} modified files using Gemini",
                 prContext.PullRequestNumber, prContext.ModifiedFiles.Count);
+            await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Information,
+                $"Generating unit tests for PR #{prContext.PullRequestNumber} with {prContext.ModifiedFiles.Count} modified files using Gemini"));
 
             var request = new GeminiRequest
             {
@@ -87,16 +97,21 @@ public class GeminiUnitTestGenerator : IGeminiUnitTestGenerator
             }
 
             var responseText = response.Candidates.First().Content.Parts.First().Text;
-            var result = ParseResponse(responseText);
+            var result = await ParseResponseAsync(responseText);
 
             _logger.LogInformation("Successfully generated {TestCount} unit tests for PR #{PrNumber}",
                 result.GeneratedTests.Count, prContext.PullRequestNumber);
+            await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Information,
+                $"Successfully generated {result.GeneratedTests.Count} unit tests for PR #{prContext.PullRequestNumber}"));
 
             return result;
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error generating unit tests for PR #{PrNumber}", prContext.PullRequestNumber);
+            await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Error,
+                $"Error generating unit tests for PR #{prContext.PullRequestNumber}", ex.Message));
+
             return new UnitTestGenerationResult
             {
                 Success = false,
@@ -110,11 +125,20 @@ public class GeminiUnitTestGenerator : IGeminiUnitTestGenerator
     {
         try
         {
-            var prompt = BuildTestRegenerationPrompt(failedUnitTest, prContext);
+            var prompt = await BuildTestRegenerationPromptAsync(failedUnitTest, prContext);
             
 
             _logger.LogInformation("Regenerating unit tests for PR #{PrNumber} with {FileCount} modified files using Gemini",
                 prContext.PullRequestNumber, prContext.ModifiedFiles.Count);
+
+            var stringBuilder = new StringBuilder();
+            stringBuilder.AppendLine($"Compilation Errors for failing unit tests in {failedUnitTest.FileName} file:");
+            stringBuilder.AppendLine($"Code      Severity      Description      Line      Column");
+
+            failedUnitTest.CompilationResult?.Errors.ForEach(error => stringBuilder.AppendLine($"{error.ErrorCode} { error.Severity} {error.Message} {error.LineNumber} {error.ColumnNumber}"));
+
+            await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Debug,
+                $"Regenerating unit tests for file {failedUnitTest.FileName} using Gemini. Current compilation errors {stringBuilder}"));
 
             var request = new GeminiRequest
             {
@@ -169,16 +193,22 @@ public class GeminiUnitTestGenerator : IGeminiUnitTestGenerator
             }
 
             var responseText = response.Candidates.First().Content.Parts.First().Text;
-            var result = ParseResponse(responseText);
+            var result = await ParseResponseAsync(responseText);
 
             _logger.LogInformation("Successfully regenerated {TestCount} unit tests for PR #{PrNumber}",
                 result.GeneratedTests.Count, prContext.PullRequestNumber);
+
+            await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Information,
+                $"Successfully generated {result.GeneratedTests.Count} unit tests for PR #{prContext.PullRequestNumber}"));
 
             return result;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error generating unit tests for PR #{PrNumber}", prContext.PullRequestNumber);
+            _logger.LogError(ex, "Error regenerating unit tests for PR #{PrNumber}", prContext.PullRequestNumber);
+            await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Error,
+                $"Error rgenerating unit tests for file {failedUnitTest.FileName}", ex.Message));
+
             return new UnitTestGenerationResult
             {
                 Success = false,
@@ -202,6 +232,8 @@ public class GeminiUnitTestGenerator : IGeminiUnitTestGenerator
         var httpContent = new StringContent(jsonContent, Encoding.UTF8, "application/json");
 
         _logger.LogDebug("Calling Gemini API with {ContentLength} characters", jsonContent.Length);
+        await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Debug,
+            $"Calling Gemini API with POST HTTP call to {url}. Content has {jsonContent.Length} characters"));
 
         var response = await _httpClient.PostAsync(url, httpContent);
 
@@ -209,6 +241,9 @@ public class GeminiUnitTestGenerator : IGeminiUnitTestGenerator
         {
             var errorContent = await response.Content.ReadAsStringAsync();
             _logger.LogError("Gemini AI API error: {StatusCode} - {Error}", response.StatusCode, errorContent);
+            await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Debug,
+                $"Gemini AI API error: {response.StatusCode}", errorContent));
+
             throw new HttpRequestException($"Gemini AI API error: {response.StatusCode} - {errorContent}");
         }
 
@@ -252,7 +287,7 @@ TESTING BEST PRACTICES:
 - Use parameterized tests for multiple similar scenarios";
     }
 
-    private string BuildUnitTestPrompt(PullRequestContext prContext)
+    private async Task<string> BuildUnitTestPromptAsync(PullRequestContext prContext)
     {
         var promptBuilder = new StringBuilder();
 
@@ -284,6 +319,8 @@ TESTING BEST PRACTICES:
 
         _logger.LogDebug("Generated prompt with {CharacterCount} characters for PR #{PrNumber}",
             prompt.Length, prContext.PullRequestNumber);
+        await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Debug,
+            $"Generated prompt with {prompt.Length} characters for PR #{prContext.PullRequestNumber}"));
 
         return prompt;
     }
@@ -342,7 +379,7 @@ TESTING BEST PRACTICES:
 - Ensure proper disposal of resources";
     }
 
-    private string BuildTestRegenerationPrompt(GeneratedUnitTest failedTest, PullRequestContext originalPrContext)
+    private async Task<string> BuildTestRegenerationPromptAsync(GeneratedUnitTest failedTest, PullRequestContext originalPrContext)
     {
         var promptBuilder = new StringBuilder();
 
@@ -430,15 +467,19 @@ TESTING BEST PRACTICES:
 
         _logger.LogDebug("Generated regeneration prompt with {CharacterCount} characters for test {ClassName}",
             prompt.Length, failedTest.ClassName);
+        await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Debug,
+            $"Generated regeneration prompt with {prompt.Length} characters for file {failedTest.FileName}"));
 
         return prompt;
     }
 
 
-    private UnitTestGenerationResult ParseResponse(string jsonResponse)
+    private async Task<UnitTestGenerationResult> ParseResponseAsync(string jsonResponse)
     {
         try
         {
+            await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Information,
+                "Trying to parse Gemini AI unit tests response"));
             var options = new JsonSerializerOptions
             {
                 PropertyNameCaseInsensitive = true,
@@ -449,6 +490,9 @@ TESTING BEST PRACTICES:
 
             if (response == null)
             {
+                await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Error,
+                "Failed to deserialize Gemini response"));
+
                 throw new InvalidOperationException("Failed to deserialize Gemini response");
             }
 
@@ -462,6 +506,8 @@ TESTING BEST PRACTICES:
         catch (JsonException ex)
         {
             _logger.LogError(ex, "Failed to parse Gemini JSON response: {Response}", jsonResponse);
+            await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Error,
+                $"Failed to parse Gemini JSON response: {jsonResponse}", ex.Message));
 
             // Fallback: try to extract code blocks if JSON parsing fails
             var fallbackTests = ExtractCodeBlocksFallback(jsonResponse);
@@ -587,5 +633,10 @@ TESTING BEST PRACTICES:
                 promptBuilder.AppendLine();
             }
         }
+    }
+
+    private static LogEntry BuildLog(Models.LoggingModels.LogLevel logLevel, string message, string? exception = "")
+    {
+        return new LogEntry() { Level = logLevel, Message = message, Exception = exception, Component = "GeminiUnitTestGenerator" };
     }
 }

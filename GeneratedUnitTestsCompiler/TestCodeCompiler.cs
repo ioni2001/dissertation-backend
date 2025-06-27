@@ -7,6 +7,8 @@ using Models.CompilationModels;
 using Models.GeminiModels;
 using Models.GithubModels.Configuration;
 using CliWrap;
+using SignalRLogger;
+using NUnit.Framework.Internal;
 
 namespace GeneratedUnitTestsCompiler;
 
@@ -15,12 +17,14 @@ public class TestCodeCompiler : ITestCodeCompiler
     private readonly ILogger<TestCodeCompiler> _logger;
     private readonly string _tempDirectory;
     private readonly GitHub _gitHub;
+    private readonly ISignalRLoggerService _signalRLoggerService;
 
-    public TestCodeCompiler(ILogger<TestCodeCompiler> logger, GitHub gitHub)
+    public TestCodeCompiler(ILogger<TestCodeCompiler> logger, GitHub gitHub, ISignalRLoggerService signalRLoggerService)
     {
         _logger = logger;
         _gitHub = gitHub;
         _tempDirectory = Path.Combine(Path.GetTempPath(), "RepoCompilation");
+        _signalRLoggerService = signalRLoggerService;
 
         Directory.CreateDirectory(_tempDirectory);
     }
@@ -28,6 +32,8 @@ public class TestCodeCompiler : ITestCodeCompiler
     public async Task<CompilationResult> CompileTestCodeAsync(GeneratedUnitTest unitTest, string repoPath, MSBuildWorkspace workspace)
     {
         var solutionPath = Directory.GetFiles(repoPath, "*.sln", SearchOption.AllDirectories).First();
+        await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Information,
+            $"Started compiling failed unit tests from file {unitTest.FileName} using Roslyn Compiler"));
 
         await Cli.Wrap("dotnet")
             .WithArguments($"restore \"{solutionPath}\"")
@@ -51,6 +57,8 @@ public class TestCodeCompiler : ITestCodeCompiler
             if (existingTree != null)
             {
                 compilation = compilation?.RemoveSyntaxTrees(existingTree);
+                await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Information,
+                        "Removed existing syntax tree for file: {test.FileName}"));
                 _logger.LogInformation($"Removed existing syntax tree for file: {unitTest.FileName}");
             }
         }
@@ -62,6 +70,9 @@ public class TestCodeCompiler : ITestCodeCompiler
         if (emitResult is null)
         {
             _logger.LogError("Failed to compile generated unit test {Generated UnitTest}", unitTest.TestCode);
+            await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Error,
+                        $"Failed to compile generated unit test {unitTest.TestCode}"));
+
             return new CompilationResult { IsSuccessful = false };
         }
 
@@ -88,6 +99,8 @@ public class TestCodeCompiler : ITestCodeCompiler
 
     public async Task<List<CompilationResult>> CompileAllTestsAsync(List<GeneratedUnitTest> tests, string repoPath, MSBuildWorkspace workspace)
     {
+        await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Information,
+            "Started compiling all generated unit tests using Roslyn Compiler"));
 
         var solutionPath = Directory.GetFiles(repoPath, "*.sln", SearchOption.AllDirectories).First();
 
@@ -117,6 +130,8 @@ public class TestCodeCompiler : ITestCodeCompiler
                 if (existingTree != null)
                 {
                     compilation = compilation?.RemoveSyntaxTrees(existingTree);
+                    await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Information,
+                        "Removed existing syntax tree for file: {test.FileName}"));
                     _logger.LogInformation($"Removed existing syntax tree for file: {test.FileName}");
                 }
             }
@@ -128,6 +143,8 @@ public class TestCodeCompiler : ITestCodeCompiler
             if (emitResult is null)
             {
                 _logger.LogError("Failed to compile generated unit test {Generated UnitTest}", test.TestCode);
+                await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Error,
+                        $"Failed to compile generated unit test {test.TestCode}"));
                 continue;
             }
 
@@ -154,12 +171,14 @@ public class TestCodeCompiler : ITestCodeCompiler
         return results;
     }
 
-    public string CloneRepository(string repositoryUrl, string branchName, string user)
+    public async Task<string> CloneRepositoryAsync(string repositoryUrl, string branchName, string user)
     {
         var repoId = Guid.NewGuid().ToString("N")[..8];
         var repoPath = Path.Combine(_tempDirectory, $"repo_{repoId}");
 
         _logger.LogInformation("Cloning repository {Url} branch {Branch} to {Path}", repositoryUrl, branchName, repoPath);
+        await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Information,
+            $"Cloning repository {repositoryUrl} branch {branchName} to {repoPath}"));
 
         var cloneOptions = new CloneOptions
         {
@@ -179,10 +198,13 @@ public class TestCodeCompiler : ITestCodeCompiler
         Repository.Clone(repositoryUrl, repoPath, cloneOptions);
 
         _logger.LogInformation("Repository cloned successfully to {Path}", repoPath);
+        await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Information,
+            $"Repository cloned successfully to {repoPath}"));
+
         return repoPath;
     }
 
-    public void CleanupRepository(string repoPath)
+    public async Task CleanupRepositoryAsync(string repoPath)
     {
         if (!string.IsNullOrEmpty(repoPath) && Directory.Exists(repoPath))
         {
@@ -193,7 +215,14 @@ public class TestCodeCompiler : ITestCodeCompiler
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Failed to cleanup repository directory: {Path}", repoPath);
+                await _signalRLoggerService.SendLogAsync(BuildLog(Models.LoggingModels.LogLevel.Error,
+                        $"Failed to cleanup repository directory: {repoPath}", ex.Message));
             }
         }
+    }
+
+    private static Models.LoggingModels.LogEntry BuildLog(Models.LoggingModels.LogLevel logLevel, string message, string? exception = "")
+    {
+        return new Models.LoggingModels.LogEntry() { Level = logLevel, Message = message, Exception = exception, Component = "TestCodeCompiler" };
     }
 }

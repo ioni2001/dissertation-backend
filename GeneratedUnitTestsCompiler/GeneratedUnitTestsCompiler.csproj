@@ -31,6 +31,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Models\Models.csproj" />
+    <ProjectReference Include="..\SignalRLogger\SignalRLogger.csproj" />
   </ItemGroup>
 
 </Project>

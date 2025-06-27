@@ -10,7 +10,7 @@ public interface ITestCodeCompiler
 
     Task<List<CompilationResult>> CompileAllTestsAsync(List<GeneratedUnitTest> tests, string repoPath, MSBuildWorkspace workspace);
 
-    string CloneRepository(string repositoryUrl, string branchName, string user);
+    Task<string> CloneRepositoryAsync(string repositoryUrl, string branchName, string user);
 
-    void CleanupRepository(string repoPath);
+    Task CleanupRepositoryAsync(string repoPath);
 }
